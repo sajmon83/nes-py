@@ -4,9 +4,9 @@ import glob
 import itertools
 import os
 import sys
-import gym
-from gym.spaces import Box
-from gym.spaces import Discrete
+import gymnasium as gym
+from gymnasium.spaces import Box
+from gymnasium.spaces import Discrete
 import numpy as np
 from ._rom import ROM
 from ._image_viewer import ImageViewer
@@ -85,8 +85,8 @@ class NESEnv(gym.Env):
 
     # relevant meta-data about the environment
     metadata = {
-        'render.modes': ['rgb_array', 'human'],
-        'video.frames_per_second': 60
+        'render_modes': ['rgb_array', 'human'],
+        'render_fps': 60
     }
 
     # the legal range for rewards for this environment
@@ -243,21 +243,21 @@ class NESEnv(gym.Env):
         # return the list of seeds used by RNG(s) in the environment
         return [seed]
 
-    def reset(self, seed=None, options=None, return_info=None):
+    def reset(self, seed=None, options=None):
         """
         Reset the state of the environment and returns an initial observation.
 
         Args:
             seed (int): an optional random number seed for the next episode
-            options (any): unused
-            return_info (any): unused
+            options (dict): optional configuration for reset
 
         Returns:
-            state (np.ndarray): next frame as a result of the given action
+            tuple: (observation, info) - observation as np.ndarray and info dict
 
         """
-        # Set the seed.
-        self.seed(seed)
+        # Set the seed if provided
+        if seed is not None:
+            self.seed(seed)
         # call the before reset callback
         self._will_reset()
         # reset the emulator
@@ -269,8 +269,8 @@ class NESEnv(gym.Env):
         self._did_reset()
         # set the done flag to false
         self.done = False
-        # return the screen from the emulator
-        return self.screen
+        # return the screen from the emulator and an empty info dict
+        return self.screen, {}
 
     def _did_reset(self):
         """Handle any RAM hacking after a reset occurs."""
@@ -287,7 +287,8 @@ class NESEnv(gym.Env):
             a tuple of:
             - state (np.ndarray): next frame as a result of the given action
             - reward (float) : amount of reward returned after given action
-            - done (boolean): whether the episode has ended
+            - terminated (boolean): whether the episode has ended
+            - truncated (boolean): whether the episode was truncated
             - info (dict): contains auxiliary diagnostic information
 
         """
@@ -311,8 +312,11 @@ class NESEnv(gym.Env):
             reward = self.reward_range[0]
         elif reward > self.reward_range[1]:
             reward = self.reward_range[1]
+        # gymnasium requires terminated and truncated flags
+        terminated = self.done
+        truncated = False
         # return the screen from the emulator and other relevant data
-        return self.screen, reward, self.done, info
+        return self.screen, reward, terminated, truncated, info
 
     def _get_reward(self):
         """Return the reward after a step occurs."""
@@ -388,7 +392,7 @@ class NESEnv(gym.Env):
             return self.screen
         else:
             # unpack the modes as comma delineated strings ('a', 'b', ...)
-            render_modes = [repr(x) for x in self.metadata['render.modes']]
+            render_modes = [repr(x) for x in self.metadata['render_modes']]
             msg = 'valid render modes are: {}'.format(', '.join(render_modes))
             raise NotImplementedError(msg)
 
@@ -424,6 +428,43 @@ class NESEnv(gym.Env):
     def get_action_meanings(self):
         """Return a list of actions meanings."""
         return ['NOOP']
+
+    def __getstate__(self):
+        """
+        Get state for pickling. Used for multiprocessing support (SubprocVecEnv).
+        
+        Returns:
+            dict: State dictionary containing only picklable objects
+        """
+        state = self.__dict__.copy()
+        # Remove unpicklable C++ objects and viewer
+        state['_env'] = None
+        state['viewer'] = None
+        state['controllers'] = None
+        state['screen'] = None
+        state['ram'] = None
+        return state
+
+    def __setstate__(self, state):
+        """
+        Restore state from pickling. Used for multiprocessing support (SubprocVecEnv).
+        
+        Args:
+            state (dict): State dictionary to restore
+        """
+        self.__dict__.update(state)
+        # Reinitialize the C++ environment
+        self._env = _LIB.Initialize(self._rom_path)
+        # Recreate buffers
+        self.controllers = [self._controller_buffer(port) for port in range(2)]
+        self.screen = self._screen_buffer()
+        self.ram = self._ram_buffer()
+        # Restore backup if it existed
+        if self._has_backup:
+            # Reset and create new backup in the new process
+            _LIB.Reset(self._env)
+            self._did_reset()
+            self._backup()
 
 
 # explicitly define the outward facing API of this module
